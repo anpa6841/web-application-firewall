@@ -20,7 +20,6 @@ using std::cout;
 using std::cerr;
 using std::endl;
 
-
 // Structure to represent HTTP request
 struct HttpRequest {
     string ip;
@@ -30,14 +29,14 @@ struct HttpRequest {
     std::unordered_map<string, string> headers;
 };
 
-
 struct HttpResponse {
     int status_code;
     string body;
     std::unordered_map<string, string> headers;    
 };
 
-void saveHeader(HttpRequest request, string headerLine, size_t colonPos) {
+
+void save_header(HttpRequest request, string headerLine, size_t colonPos) {
     // cout << "Header Line: " << headerLine << endl;
 
     string headerName = headerLine.substr(0, colonPos);
@@ -46,7 +45,6 @@ void saveHeader(HttpRequest request, string headerLine, size_t colonPos) {
     // cout << "Header Name: " << headerName << endl;
     // cout << "Header Value: " << headerValue << endl;
     request.headers[headerName] = headerValue;
-
     return;
 }
 
@@ -83,20 +81,37 @@ HttpRequest parseHttpRequest(const string& httpRequest, const string& clientIP) 
     while ((headerPos = headersStr.find("\r\n", prev)) != string::npos) {
         string headerLine = headersStr.substr(prev, headerPos - prev);
         size_t colonPos = headerLine.find(": ");
-        saveHeader(request, headerLine, colonPos);
+        save_header(request, headerLine, colonPos);
         prev = headerPos + 2;
     }
 
     // Parse the last header
     string headerLine = headersStr.substr(prev, headerEnd);
     size_t colonPos = headerLine.find(": ");
-    saveHeader(request, headerLine, colonPos);
+    save_header(request, headerLine, colonPos);
 
     // Parse request body
     request.body = httpRequest.substr(headerEnd + 4); // Skip "\r\n\r\n"
-    cout << endl << "Req Body: " << request.body << endl << endl;
-
     return request;
+}
+
+// Function to send HTTP response to client
+void sendHttpResponse(int clientSocket, const HttpResponse& response) {
+    // Construct HTTP response string
+    string httpResponse = "HTTP/1.1 " + std::to_string(response.status_code) + "\r\n";
+    for (const auto& [headerName, headerValue] : response.headers) {
+        httpResponse += headerName + ": " + headerValue + "\r\n";
+    }
+    httpResponse += "\r\n" + response.body + "\r\n";
+
+    // Send HTTP response to client
+    send(clientSocket, httpResponse.c_str(), httpResponse.size(), 0);
+    close(clientSocket);
+}
+
+
+bool webApplicationFirewall(const HttpRequest& request, HttpResponse& response) {
+    return true;
 }
 
 
@@ -115,6 +130,22 @@ void handleClient(int clientSocket, const string& clientIP) {
 
     // Parse HTTP request
     HttpRequest request = parseHttpRequest(httprequest, clientIP);
+
+    // Simulated HTTP response
+    HttpResponse response;
+    response.status_code = 200;
+    response.body = "OK";
+
+    // Perform WAF checks
+    if (!webApplicationFirewall(request, response)) {
+        cout << "Request blocked: " << response.body << endl;
+        // Send HTTP response to client
+        sendHttpResponse(clientSocket, response);
+    } else {
+        cout << "Request allowed" << endl;
+        // Send HTTP response to client (allowed)
+        sendHttpResponse(clientSocket, response);
+    }
 }
 
 int main() {
