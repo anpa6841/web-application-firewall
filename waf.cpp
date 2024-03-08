@@ -6,19 +6,34 @@
 #include <mutex>
 #include <vector>
 #include <functional>
-#include <chrono>
 #include <queue>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <chrono>
+#include <ctime>
+#include <ratio>
 
-#define BUFFER_SIZE 4096
-
+using namespace std::chrono;
 using std::string;
 using std::cout;
 using std::cerr;
 using std::endl;
+
+#define BUFFER_SIZE 4096
+
+// Dictionary to store request timestamps for IP address
+std::unordered_map<string, std::vector<time_point<steady_clock>>> requestsTimestamps;
+
+// Window size for sliding window (in seconds)
+const int WINDOW_SIZE = 60;
+
+// Threshold for num of requests that can be accepted within the window_size
+const int THRESHOLD = 20;
+
+// Mutex for thread-safe access to requestCounts
+std::mutex mtx;
 
 // Structure to represent HTTP request
 struct HttpRequest {
@@ -203,7 +218,52 @@ bool urlFiltering(const string& request) {
     return false;
 }
 
-bool webApplicationFirewall(const HttpRequest& request, HttpResponse& response) {
+// Function to clean up request counts older than the window size
+void cleanupRequestTimestamps(const string& clientIP){
+    // Acquire lock to ensure thread safety
+    std::lock_guard<std::mutex> guard(mtx);
+
+    auto it = requestsTimestamps.find(clientIP);
+    if (it != requestsTimestamps.end()) {
+        // Get vector of timestamps for the clientIP
+        auto& timestamps = it -> second;
+        auto currentTime = steady_clock::now();
+        timestamps.erase(remove_if(timestamps.begin(), timestamps.end(),
+            [currentTime](const auto& timestamp) {
+                return duration_cast<seconds>(currentTime - timestamp).count() > WINDOW_SIZE;
+            }), timestamps.end());
+
+    // Check if timestamps vector is empty after erasing
+    if (timestamps.empty()) {
+            // If it's empty, remove the entry from requestsTimestamps
+            requestsTimestamps.erase(it);
+        }
+    }
+}
+
+bool isRateLimited(const string& clientIP) {
+    // Clean up request timestamps
+    cleanupRequestTimestamps(clientIP);
+
+    auto currentTime = steady_clock::now();
+
+    // Update request timestamps for IP address
+    int requestCount;
+    {
+        std::lock_guard<std::mutex> guard(mtx);
+        requestsTimestamps[clientIP].push_back(currentTime);
+        requestCount = requestsTimestamps[clientIP].size();
+        cout << "Req Count: " << requestCount << endl;
+    }
+
+    if (requestCount > THRESHOLD) {
+        return true;
+    }
+
+    return false;
+}
+
+bool webApplicationFirewall(const HttpRequest& request, HttpResponse& response, const string& clientIP) {
     if (containsSqlInjection(toLower(request.path)) || containsSqlInjection(toLower(request.body))) {
         response.status_code = 403;
         response.body = "Forbidden: SQL Injection detected";
@@ -234,6 +294,12 @@ bool webApplicationFirewall(const HttpRequest& request, HttpResponse& response) 
         return false;
     }
 
+    if (isRateLimited(clientIP)) {
+        response.status_code = 403;
+        response.body = "Forbidden: Request rates exceeded Threshold";
+        return false;
+    }
+
     return true;
 }
 
@@ -260,7 +326,7 @@ void handleClient(int clientSocket, const string& clientIP) {
     response.body = "OK";
 
     // Perform WAF checks
-    if (!webApplicationFirewall(request, response)) {
+    if (!webApplicationFirewall(request, response, clientIP)) {
         cout << "Request blocked: " << response.body << endl;
         // Send HTTP response to client
         sendHttpResponse(clientSocket, response);

@@ -1,0 +1,7 @@
+#!/bin/bash
+
+for i in `seq 1 50`
+do
+	curl --interface en0 "127.0.0.1:8080/endpoint?param1=value1&param2=value2"
+	sleep 0.5
+done
