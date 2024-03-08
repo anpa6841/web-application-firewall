@@ -35,8 +35,14 @@ struct HttpResponse {
     std::unordered_map<string, string> headers;    
 };
 
+// Utility function to convert string to lowercase
+std::string toLower(const std::string& str) {
+    std::string result = str;
+    std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+    return result;
+}
 
-void save_header(HttpRequest request, string headerLine, size_t colonPos) {
+void save_header(HttpRequest& request, string headerLine, size_t colonPos) {
     // cout << "Header Line: " << headerLine << endl;
 
     string headerName = headerLine.substr(0, colonPos);
@@ -47,7 +53,6 @@ void save_header(HttpRequest request, string headerLine, size_t colonPos) {
     request.headers[headerName] = headerValue;
     return;
 }
-
 
 // Function to parse HTTP request from client
 HttpRequest parseHttpRequest(const string& httpRequest, const string& clientIP) {
@@ -109,8 +114,126 @@ void sendHttpResponse(int clientSocket, const HttpResponse& response) {
     close(clientSocket);
 }
 
+bool containsSqlInjection(const string& request) {
+    static std::unordered_set<string> sqlKeywords = {
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "DROP",
+        "UNION",
+        "AND",
+        "OR"
+    };
+    for (const auto& keyword : sqlKeywords) {
+        if (request.find(toLower(keyword)) != string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool containsXss(const string& request) {
+    static std::unordered_set<string> xssKeywords = {
+        "script",
+        "alert",
+        "prompt",
+        "javascript",
+        "img"
+    };
+    for (const auto& keyword : xssKeywords) {
+        if (request.find(toLower(keyword)) != string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool containsCommandInjection(const string& request) {
+    static std::unordered_set<string> commandKeywords = {
+        "rm",
+        "nc",
+        "cat /etc/passwd",
+        "ping",
+        "||",
+        "/bin/bash",
+        "sleep",
+        "id",
+        "() { :;};",
+        "<?php system(\"cat /etc/passwd\");?>",
+        "system('cat /etc/passwd');"
+    };
+    for (const auto& keyword : commandKeywords) {
+        if (request.find(toLower(keyword)) != string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool analyzeHeaders(const std::unordered_map<string, string>& headers) {
+        static std::unordered_set<string> headerPayloads = {
+        "<script>",
+        "malicious-site.com",
+        "<script>alert('XSS');</script>",
+        "malicious-session-id"
+    };
+
+    for (const auto& payload : headerPayloads) {
+        for (const auto& [headerName, headerValue] : headers) {
+            if (toLower(headerValue).find(toLower(payload)) != string::npos) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool urlFiltering(const string& request) {
+    static std::unordered_set<string> restrictedUrls = {
+        "/protected-resource",
+        "/credit-card-info",
+        "/personal-info/ssn"
+    };
+    for (const auto& keyword : restrictedUrls) {
+        if (request.find(toLower(keyword)) != string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool webApplicationFirewall(const HttpRequest& request, HttpResponse& response) {
+    if (containsSqlInjection(toLower(request.path)) || containsSqlInjection(toLower(request.body))) {
+        response.status_code = 403;
+        response.body = "Forbidden: SQL Injection detected";
+        return false;
+    }
+
+    if (containsXss(request.path) || containsXss(request.body)) {
+        response.status_code = 403;
+        response.body = "Forbidden: XSS detected";
+        return false;
+    }
+
+    if (containsCommandInjection(request.path) || containsCommandInjection(request.body)) {
+        response.status_code = 403;
+        response.body = "Forbidden: Command Injection detected";
+        return false;
+    }
+
+    if (analyzeHeaders(request.headers)) {
+        response.status_code = 403;
+        response.body = "Forbidden: Invalid headers";
+        return false;
+    }
+
+    if (urlFiltering(request.path)) {
+        response.status_code = 403;
+        response.body = "Forbidden: URL filtering";
+        return false;
+    }
+
     return true;
 }
 
