@@ -1,267 +1,7 @@
-#include <iostream>
-#include <string>
-#include <unordered_set>
-#include <unordered_map>
 #include <thread>
-#include <mutex>
-#include <vector>
-#include <functional>
-#include <queue>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <chrono>
-#include <ctime>
-#include <ratio>
 
-using namespace std::chrono;
-using std::string;
-using std::cout;
-using std::cerr;
-using std::endl;
-
-#define BUFFER_SIZE 4096
-
-// Dictionary to store request timestamps for IP address
-std::unordered_map<string, std::vector<time_point<steady_clock>>> requestsTimestamps;
-
-// Window size for sliding window (in seconds)
-const int WINDOW_SIZE = 60;
-
-// Threshold for num of requests that can be accepted within the window_size
-const int THRESHOLD = 20;
-
-// Mutex for thread-safe access to requestCounts
-std::mutex mtx;
-
-// Structure to represent HTTP request
-struct HttpRequest {
-    string ip;
-    string method;
-    string path;
-    string body;
-    std::unordered_map<string, string> headers;
-};
-
-struct HttpResponse {
-    int status_code;
-    string body;
-    std::unordered_map<string, string> headers;    
-};
-
-// Utility function to convert string to lowercase
-std::string toLower(const std::string& str) {
-    std::string result = str;
-    std::transform(result.begin(), result.end(), result.begin(), ::tolower);
-    return result;
-}
-
-void save_header(HttpRequest& request, string headerLine, size_t colonPos) {
-    // cout << "Header Line: " << headerLine << endl;
-
-    string headerName = headerLine.substr(0, colonPos);
-    string headerValue = headerLine.substr(colonPos + 2);
-
-    // cout << "Header Name: " << headerName << endl;
-    // cout << "Header Value: " << headerValue << endl;
-    request.headers[headerName] = headerValue;
-    return;
-}
-
-// Function to parse HTTP request from client
-HttpRequest parseHttpRequest(const string& httpRequest, const string& clientIP) {
-    HttpRequest request;
-    request.ip = clientIP;
-
-    // Parse request method, path and headers
-    size_t pos = httpRequest.find("\r\n");
-    string requestLine = httpRequest.substr(0, pos);
-    
-    // cout << endl << "Req Line: " << requestLine << endl;
-
-    size_t methodPos = requestLine.find(" ");
-    size_t pathPos = requestLine.find(" ", methodPos + 1);
-
-    // cout << "Method Pos: " << methodPos << endl;
-    // cout << "Path Pos: " << pathPos << endl;
-    // cout << "Method: " << request.method << endl;
-    // cout << "Path: " << request.path << endl;
-
-    request.method = requestLine.substr(0, methodPos);
-    request.path = requestLine.substr(methodPos + 1, pathPos - methodPos - 1);
-
-    // Parse request headers
-    size_t headerEnd = httpRequest.find("\r\n\r\n");
-    size_t headerStart = pos + 2;
-    string headersStr = httpRequest.substr(headerStart, headerEnd - headerStart);
-    size_t headerPos = 0;
-    size_t prev = 0;
-
-    while ((headerPos = headersStr.find("\r\n", prev)) != string::npos) {
-        string headerLine = headersStr.substr(prev, headerPos - prev);
-        size_t colonPos = headerLine.find(": ");
-        save_header(request, headerLine, colonPos);
-        prev = headerPos + 2;
-    }
-
-    // Parse the last header
-    string headerLine = headersStr.substr(prev, headerEnd);
-    size_t colonPos = headerLine.find(": ");
-    save_header(request, headerLine, colonPos);
-
-    // Parse request body
-    request.body = httpRequest.substr(headerEnd + 4); // Skip "\r\n\r\n"
-    return request;
-}
-
-// Function to send HTTP response to client
-void sendHttpResponse(int clientSocket, const HttpResponse& response) {
-    // Construct HTTP response string
-    string httpResponse = "HTTP/1.1 " + std::to_string(response.status_code) + "\r\n";
-    for (const auto& [headerName, headerValue] : response.headers) {
-        httpResponse += headerName + ": " + headerValue + "\r\n";
-    }
-    httpResponse += "\r\n" + response.body + "\r\n";
-
-    // Send HTTP response to client
-    send(clientSocket, httpResponse.c_str(), httpResponse.size(), 0);
-    close(clientSocket);
-}
-
-bool containsSqlInjection(const string& request) {
-    static std::unordered_set<string> sqlKeywords = {
-        "SELECT",
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "DROP",
-        "UNION",
-        "AND",
-        "OR"
-    };
-    for (const auto& keyword : sqlKeywords) {
-        if (request.find(toLower(keyword)) != string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool containsXss(const string& request) {
-    static std::unordered_set<string> xssKeywords = {
-        "script",
-        "alert",
-        "prompt",
-        "javascript",
-        "img"
-    };
-    for (const auto& keyword : xssKeywords) {
-        if (request.find(toLower(keyword)) != string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool containsCommandInjection(const string& request) {
-    static std::unordered_set<string> commandKeywords = {
-        "rm",
-        "nc",
-        "cat /etc/passwd",
-        "ping",
-        "||",
-        "/bin/bash",
-        "sleep",
-        "id",
-        "() { :;};",
-        "<?php system(\"cat /etc/passwd\");?>",
-        "system('cat /etc/passwd');"
-    };
-    for (const auto& keyword : commandKeywords) {
-        if (request.find(toLower(keyword)) != string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool analyzeHeaders(const std::unordered_map<string, string>& headers) {
-        static std::unordered_set<string> headerPayloads = {
-        "<script>",
-        "malicious-site.com",
-        "<script>alert('XSS');</script>",
-        "malicious-session-id"
-    };
-
-    for (const auto& payload : headerPayloads) {
-        for (const auto& [headerName, headerValue] : headers) {
-            if (toLower(headerValue).find(toLower(payload)) != string::npos) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool urlFiltering(const string& request) {
-    static std::unordered_set<string> restrictedUrls = {
-        "/protected-resource",
-        "/credit-card-info",
-        "/personal-info/ssn"
-    };
-    for (const auto& keyword : restrictedUrls) {
-        if (request.find(toLower(keyword)) != string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Function to clean up request counts older than the window size
-void cleanupRequestTimestamps(const string& clientIP){
-    // Acquire lock to ensure thread safety
-    std::lock_guard<std::mutex> guard(mtx);
-
-    auto it = requestsTimestamps.find(clientIP);
-    if (it != requestsTimestamps.end()) {
-        // Get vector of timestamps for the clientIP
-        auto& timestamps = it -> second;
-        auto currentTime = steady_clock::now();
-        timestamps.erase(remove_if(timestamps.begin(), timestamps.end(),
-            [currentTime](const auto& timestamp) {
-                return duration_cast<seconds>(currentTime - timestamp).count() > WINDOW_SIZE;
-            }), timestamps.end());
-
-    // Check if timestamps vector is empty after erasing
-    if (timestamps.empty()) {
-            // If it's empty, remove the entry from requestsTimestamps
-            requestsTimestamps.erase(it);
-        }
-    }
-}
-
-bool isRateLimited(const string& clientIP) {
-    // Clean up request timestamps
-    cleanupRequestTimestamps(clientIP);
-
-    auto currentTime = steady_clock::now();
-
-    // Update request timestamps for IP address
-    int requestCount;
-    {
-        std::lock_guard<std::mutex> guard(mtx);
-        requestsTimestamps[clientIP].push_back(currentTime);
-        requestCount = requestsTimestamps[clientIP].size();
-        cout << "Req Count: " << requestCount << endl;
-    }
-
-    if (requestCount > THRESHOLD) {
-        return true;
-    }
-
-    return false;
-}
+#include "HTTPUtils.h"
+#include "WAFFilters.h"
 
 bool webApplicationFirewall(const HttpRequest& request, HttpResponse& response, const string& clientIP) {
     if (containsSqlInjection(toLower(request.path)) || containsSqlInjection(toLower(request.body))) {
@@ -299,7 +39,6 @@ bool webApplicationFirewall(const HttpRequest& request, HttpResponse& response, 
         response.body = "Forbidden: Request rates exceeded Threshold";
         return false;
     }
-
     return true;
 }
 
@@ -314,7 +53,6 @@ void handleClient(int clientSocket, const string& clientIP) {
     }
     buffer[BUFFER_SIZE - 1] = '\0';
     string httprequest(buffer);
-    cout << "Client IP: " << clientIP << endl << endl;
     cout << "Request: " << endl << endl <<  httprequest << endl;
 
     // Parse HTTP request
@@ -323,15 +61,17 @@ void handleClient(int clientSocket, const string& clientIP) {
     // Simulated HTTP response
     HttpResponse response;
     response.status_code = 200;
-    response.body = "OK";
+    response.body = "Request Allowed: All WAF Filtering checks passed.";
+
+    cout << "Client IP: " << clientIP << endl;
 
     // Perform WAF checks
     if (!webApplicationFirewall(request, response, clientIP)) {
-        cout << "Request blocked: " << response.body << endl;
+        cout << "Request Blocked: " << request.path << endl;
         // Send HTTP response to client
         sendHttpResponse(clientSocket, response);
     } else {
-        cout << "Request allowed" << endl;
+        cout << "Request allowed: " << request.path << endl;
         // Send HTTP response to client (allowed)
         sendHttpResponse(clientSocket, response);
     }
@@ -363,14 +103,12 @@ int main() {
         return 1;
     }
 
-
     // Listen for incoming connections
     if (listen(serverSocket, SOMAXCONN) == -1) {
         cerr << "Error: Failed to listen for connections " << endl;
         close(serverSocket);
         return 1;
     }
-
     cout << "Waf server running on port " << std::to_string(ntohs(serverAddress.sin_port)) << endl << endl;
 
     while (true) {
@@ -381,7 +119,6 @@ int main() {
             cerr << "Error: Failed to accept client connection" << endl;
             continue;
         }
-
         std::thread(handleClient, clientSocket, inet_ntoa(clientAddress.sin_addr)).detach();
     }
 

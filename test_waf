@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+import requests
+import time
+
+waf_server = "http://127.0.0.1:8080"
+
+# Inject payload in request url
+paths = [
+    ### SQLi payloads
+    "/page.asp?status=1' OR 1=1 --",
+    "/login?username=admin' OR 1=1 --",
+    "/account?id=1'+UNION+SELECT+table_name,+NULL+FROM+information_schema.tables--",
+
+    ### XSS payloads
+    "/transactions?filter=-prompt(8)-",
+    "/customers?<script type=\"text/javascript\">javascript:alert(1);</script>",
+    "/users?name=<IMG LOWSRC=\"javascript:alert('XSS')\">",
+
+    ### Command Injection Payloads
+    "/index.html|id|",
+    "/cmd=ls;system('cat%20/etc/passwd')",
+    "/target=& ping -i 30 127.0.0.1 &",
+
+    ### URL filtering restricted sites
+    "/protected-resource",
+    "/personal-info/ssn",
+    "/credit-card-info"
+]
+
+for path in paths:
+    response = requests.get(waf_server + path)
+    print(f"Request Path: '{path}'")
+    print(response.text)
+
+
+### Inject payload in request body
+req_body = [
+    {"username": "=1' or 1=1 -- '"},
+    {"id":"<script>alert(1)</script>"},
+    {"command": "& ping -i 30 127.0.0.1 &"}
+]
+
+for body in req_body:
+    time.sleep(0.2)
+    response = requests.post(waf_server, data=body)
+    print("Request Body : ",  response.request.body)
+    print(response.text)
+
+
+### Inject payload in request header
+headers = [
+    {'User-Agent': '<script>'},
+    {'Host': '<script>alert(\'XSS\');</script>'},
+    {'SessionId': 'malicious-session-id'},
+    {'Accept': 'malicious-site.com'}
+]
+
+for header in headers:
+    response = requests.get(waf_server + "/path", headers=header)
+    print(f"Request Header : '{list(header.keys())[0]}':'{response.request.headers[list(header.keys())[0]]}'")
+    print(response.text)
